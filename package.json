@@ -1,0 +1,14 @@
+{
+  "name": "stress-test",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "stress": "node stressTest.mjs"
+  },
+  "dependencies": {
+    "canvas": "^3.2.0",
+    "gpu.js": "^2.16.0",
+    "node-fetch": "^3.3.2",
+    "p-limit": "^7.1.1"
+  }
+}
