@@ -1,132 +1,110 @@
-import cluster from 'cluster';
+/**
+ * @file stressTest.mjs
+ * @description Framework de validação de resiliência e mitigação de riscos de infraestrutura.
+ * @version 2.0.0
+ * @author Jefferson Firmino Mendes
+ */
+
 import http from 'http';
 import https from 'https';
-import fetch from 'node-fetch';
-import { cpus } from 'os';
+import { URL } from 'url';
 
-const TOTAL_REQUESTS = 500000;
-const URL = "https://www.gruporochacavalcante.com.br/index";
-const CONCURRENCY_LIMIT = 1000;
-const REPORT_INTERVAL = 1000;
-
-if (cluster.isPrimary) {
-  console.log(`🔥 Iniciando teste de estresse otimizado`);
-  console.log(`🖥️  Processadores: ${cpus().length} núcleos`);
-  console.log(`🎯 Alvo: ${URL}`);
-  console.log(`📊 Requisições totais: ${TOTAL_REQUESTS}\n`);
-
-  const startTime = Date.now();
-  let completed = 0;
-  let successes = 0;
-  let fails = 0;
-
-  // Monitor de recursos
-  const monitor = setInterval(() => {
-    const memory = process.memoryUsage();
-    console.log(`📊 Memória: ${(memory.heapUsed / 1024 / 1024).toFixed(2)}MB`);
-  }, 5000);
-
-  // Criar workers
-  for (let i = 0; i < cpus().length; i++) {
-    const worker = cluster.fork();
-    const requestsPerWorker = Math.ceil(TOTAL_REQUESTS / cpus().length);
-
-    worker.send({
-      url: URL,
-      requests: requestsPerWorker,
-      workerId: i
-    });
-
-    worker.on('message', (msg) => {
-      completed += msg.completed;
-      successes += msg.successes;
-      fails += msg.fails;
-
-      process.stdout.write(`\r📈 Progresso: ${completed}/${TOTAL_REQUESTS} ` +
-        `(${((completed/TOTAL_REQUESTS)*100).toFixed(1)}%) | ` +
-        `✅: ${successes} | ❌: ${fails}`
-      );
-    });
-  }
-
-  cluster.on('exit', (worker) => {
-    if (Object.keys(cluster.workers).length === 0) {
-      clearInterval(monitor);
-      const totalTime = (Date.now() - startTime) / 1000;
-
-      console.log("\n\n=== 🏁 TESTE CONCLUÍDO ===");
-      console.log(`⏱️  Tempo total: ${totalTime.toFixed(2)}s`);
-      console.log(`🚀 RPS: ${(TOTAL_REQUESTS/totalTime).toFixed(2)}`);
-      console.log(`💾 Memória máxima: ${(process.memoryUsage().heapTotal / 1024 / 1024).toFixed(2)}MB`);
+class ResilienceEngine {
+    constructor(config) {
+        this.validateConfig(config);
+        this.config = config;
+        this.stats = {
+            totalRequests: 0,
+            successCount: 0,
+            errorCount: 0,
+            startTime: Date.now()
+        };
     }
-  });
 
-} else {
-  process.on('message', async (data) => {
-    const { url, requests } = data;
+    validateConfig(config) {
+        if (!config.targetUrl) throw new Error("URL de destino é obrigatória.");
+        if (config.requestsPerSecond <= 0) throw new Error("Frequência de requisições deve ser positiva.");
+    }
 
-    // Criar agente HTTP/HTTPS apropriado
-    const isHttps = url.startsWith('https');
-    const agent = isHttps
-      ? new https.Agent({ keepAlive: true, maxSockets: 200 })
-      : new http.Agent({ keepAlive: true, maxSockets: 200 });
+    async execute() {
+        console.log(`[INFO] Iniciando validação de resiliência em: ${this.config.targetUrl}`);
+        console.log(`[INFO] Carga configurada: ${this.config.requestsPerSecond} req/s`);
 
-    let successes = 0;
-    let fails = 0;
-    let completed = 0;
-    let lastReported = 0;
+        const interval = 1000 / this.config.requestsPerSecond;
 
-    const makeRequest = async () => {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        setInterval(() => {
+            this.dispatchRequest();
+        }, interval);
 
-        const response = await fetch(url, {
-          agent,
-          signal: controller.signal,
-          headers: {
-            'Connection': 'keep-alive',
-            'User-Agent': 'StressTest/1.0'
-          }
+        // Relatório de monitorização a cada 5 segundos
+        setInterval(() => this.printStatus(), 5000);
+    }
+
+    dispatchRequest() {
+        const url = new URL(this.config.targetUrl);
+        const protocol = url.protocol === 'https:' ? https : http;
+        
+        const options = {
+            method: 'GET', // Configurável para POST/PUT
+            timeout: 5000, // Prevenção de thread hanging
+            headers: {
+                'User-Agent': 'Resilience-Toolkit-Senior-Validator/2.0',
+                'Accept': 'application/json'
+            }
+        };
+
+        const req = protocol.request(this.config.targetUrl, options, (res) => {
+            this.stats.totalRequests++;
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+                this.stats.successCount++;
+            } else {
+                this.stats.errorCount++;
+            }
+            res.resume(); // Consome o stream para libertar memória
         });
 
-        clearTimeout(timeoutId);
-        response.status === 200 ? successes++ : fails++;
-      } catch {
-        fails++;
-      } finally {
-        completed++;
-      }
-    };
-
-    // Executar requisições controladamente
-    while (completed < requests) {
-      const batchSize = Math.min(CONCURRENCY_LIMIT, requests - completed);
-      const batch = Array(batchSize).fill().map(() => makeRequest());
-      await Promise.all(batch);
-
-      // Reportar progresso periodicamente
-      if (completed - lastReported >= REPORT_INTERVAL) {
-        process.send({
-          completed: completed - lastReported,
-          successes: successes,
-          fails: fails
+        req.on('error', (err) => {
+            this.stats.totalRequests++;
+            this.stats.errorCount++;
+            this.logError(err);
         });
-        lastReported = completed;
-        successes = 0;
-        fails = 0;
-      }
+
+        req.on('timeout', () => {
+            req.destroy();
+            console.error('[WARN] Request Timeout - Possível saturação de recurso.');
+        });
+
+        req.end();
     }
 
-    // Reportar quaisquer resultados restantes
-    if (successes > 0 || fails > 0) {
-      process.send({
-        completed: successes + fails,
-        successes: successes,
-        fails: fails
-      });
+    logError(err) {
+        // Implementação de logging estruturado (ex: winston ou pino)
+        // Aqui simulado para manter portabilidade
+        // console.error(`[ERROR] Falha na requisição: ${err.message}`);
     }
 
-    process.exit(0);
-  });
+    printStatus() {
+        const uptime = ((Date.now() - this.stats.startTime) / 1000).toFixed(2);
+        console.table({
+            'Target': this.config.targetUrl,
+            'Uptime (s)': uptime,
+            'Total': this.stats.totalRequests,
+            'Sucesso': this.stats.successCount,
+            'Falhas': this.stats.errorCount,
+            'Availability %': ((this.stats.successCount / this.stats.totalRequests) * 100).toFixed(2)
+        });
+    }
 }
+
+// Configuração centralizada
+const runtimeConfig = {
+    targetUrl: process.env.TARGET_URL || 'http://localhost:3000',
+    requestsPerSecond: parseInt(process.env.REQ_PER_SEC) || 10,
+    payloadSize: '1kb'
+};
+
+const engine = new ResilienceEngine(runtimeConfig);
+engine.execute().catch(err => {
+    console.error(`[FATAL] Falha crítica no motor de testes: ${err.message}`);
+    process.exit(1);
+});
